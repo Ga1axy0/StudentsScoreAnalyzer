@@ -20,17 +20,8 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from typing import List, Dict
-import io
-import zipfile
 import hashlib
-# 可选：ReportLab 仅在彩色 PDF 合并时使用，若未安装则忽略
-try:
-    from reportlab.pdfgen import canvas  # type: ignore
-    from reportlab.lib.pagesizes import A4  # type: ignore
-    from reportlab.lib.utils import ImageReader  # type: ignore
-    HAS_REPORTLAB = True
-except Exception:
-    HAS_REPORTLAB = False
+
 try:
     # 可选：拖拽排序支持
     from streamlit_sortables import sort_items  # type: ignore
@@ -39,7 +30,8 @@ except Exception:
     HAS_SORTABLES = False
 
 st.set_page_config(page_title="成绩可视化看板", layout="wide")
-st.title("📊 成绩可视化看板 - 多次考试")
+st.title("📊 成绩可视化看板")
+st.markdown("**By Ga1axy**")
 
 # ====== 打印优化：注入防分页 CSS ======
 print_css = """
@@ -183,7 +175,7 @@ if uploaded_files:
     if HAS_SORTABLES:
         with st.sidebar:
             st.markdown("**拖拽排序**：拖动下列项目改变顺序，从上到下为考试时间顺序")
-            items = [f"{row['考试标签']} ({row['文件名']})" for _, row in work_meta.iterrows()]
+            items = [f"{row['考试标签']}" for _, row in work_meta.iterrows()]
             try:
                 # 将文件列表摘要纳入 key，确保当文件增删时，拖拽组件会刷新
                 sorted_items = sort_items(items, direction="vertical", key=f"exam_drag_order_{files_digest}")
@@ -301,6 +293,7 @@ if uploaded_files:
     st.plotly_chart(fig_line, use_container_width=True)
     export_figs["总分校次排名变化折线图"] = fig_line
 
+    st.markdown("---")
     # ================= 雷达图（各科校次排名对比） =================
     st.subheader("🕸️ 雷达图：各科校次排名对比")
     # 选考试标签（多选）
@@ -335,7 +328,8 @@ if uploaded_files:
    
     st.caption("提示：雷达图数值对排名做了反转，面积越大表示名次越前。若某科缺失排名则该科为空。")
 
-  
+
+    st.markdown("---")  
 
     # ================= 总分跨考试柱状对比 =================
     st.subheader("📊 总分跨考试对比")
@@ -367,6 +361,7 @@ if uploaded_files:
     else:
         st.info("未找到总分列。")
 
+    st.markdown("---")
     # ================= 跨考试成绩对比（X=科目 颜色=考试，排除总分） =================
     st.subheader("📊 跨考试成绩对比（按科目分类，颜色区分考试，不含总分）")
     if score_cols_subjects_only:
@@ -402,7 +397,8 @@ if uploaded_files:
     else:
         st.info("未找到单科成绩列，无法生成成绩对比图。")
 
-  
+
+    st.markdown("---")  
     # ================= 跨考试排名对比（X=科目 颜色=考试） =================
     st.subheader("📊 跨考试校次排名对比（按科目分类，颜色区分考试）")
     rank_cols_exist = (["总分_校次"] if "总分_校次" in filtered_df.columns else []) + \
@@ -435,5 +431,3 @@ if uploaded_files:
             export_figs[f"{student_name} 各科校次排名对比（颜色=考试标签）"] = fig_ranks_all
 
     
-
-st.markdown("---")
