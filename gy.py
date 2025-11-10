@@ -139,8 +139,7 @@ def transform_rank_for_radar(sub_df: pd.DataFrame) -> pd.DataFrame:
     sub_df_num = sub_df.dropna(subset=["校次排名"]).copy()
     if sub_df_num.empty:
         return sub_df
-    max_rank = sub_df_num["校次排名"].max()
-    sub_df["雷达值"] = sub_df["校次排名"].apply(lambda x: (max_rank + 1 - x) if pd.notna(x) else None)
+    sub_df["雷达值"] = sub_df["校次排名"].apply(lambda x: (grade_total + 1 - x) if pd.notna(x) else None)
     return sub_df
 
 # =====================================
@@ -156,7 +155,17 @@ subjects = st.sidebar.multiselect(
     default=DEFAULT_SUBJECTS,
     help="未选中的科目将不会出现在后续图表与表格中。"
 )
+grade_total = st.sidebar.number_input(
+    "年级总人数",
+    min_value=1,
+    max_value=5000,
+    value=560,
+    step=1,
+    help="输入当前年级的学生总人数，可用于后续添加排名百分比等指标。"
+)
 st.sidebar.write("---")
+
+
 # 分数图Y轴起点自动调整设置
 st.sidebar.write("**调整Y轴**")
 
