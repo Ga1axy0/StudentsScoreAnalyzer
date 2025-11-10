@@ -268,7 +268,7 @@ if uploaded_files:
 
     col_a, col_b = st.columns([1,1])
     with col_a:
-        student_name = st.selectbox("选择单个学生", all_students)
+        student_name = st.selectbox("**选择单个学生**", all_students)
     # 折线图对比选项已移动到“排名时间序列”的科目选择下方
 
    
@@ -325,7 +325,42 @@ if uploaded_files:
     default_disp = "总分" if "总分_校次" in ordered_keys else (ordered_disp[0] if ordered_disp else "")
     selected_disp = st.selectbox("选择查看项目（总分或科目）", ordered_disp, index=(ordered_disp.index(default_disp) if default_disp in ordered_disp else 0)) if ordered_disp else None
     # 将“折线图对比多个学生”的选项移动至此（紧跟科目/总分选择）
-    multi_students = st.multiselect("折线图对比多个学生 (可选)", all_students, default=[student_name], key="multi_students_for_line")
+    # ---- 同步多学生对比选择逻辑（避免 default 与 session_state 同时设置冲突） ----
+    # 原因：当使用固定 key 时，若在 Session State 中已经设置了该 key 的值，同时又在组件上提供了 default，会触发冲突提示。
+    # 方案：
+    #  - 首次渲染：仅通过 default 提供初值（不预先写 session_state[list_key]）。
+    #  - 之后渲染：如需调整，先更新 session_state[list_key]，再创建组件且不传 default。
+    anchor_key = "_anchor_student_for_multiline"
+    list_key = "multi_students_for_line"
+
+    if list_key in st.session_state:
+        # 已初始化过：根据当前主学生与可选项动态维护列表
+        if st.session_state.get(anchor_key) != student_name:
+            st.session_state[list_key] = [student_name]
+            st.session_state[anchor_key] = student_name
+        else:
+            # 清理掉已经不在候选中的学生
+            st.session_state[list_key] = [s for s in st.session_state[list_key] if s in all_students]
+            # 确保主学生在列表中
+            if student_name not in st.session_state[list_key]:
+                st.session_state[list_key].insert(0, student_name)
+
+        multi_students = st.multiselect(
+            "折线图对比多个学生 (可选)",
+            all_students,
+            key=list_key,
+            help="当上面选择的主学生改变时，此列表会自动同步包含该学生。"
+        )
+    else:
+        # 首次渲染：通过 default 设置初值，同时记录锚定学生。
+        st.session_state[anchor_key] = student_name
+        multi_students = st.multiselect(
+            "折线图对比多个学生 (可选)",
+            all_students,
+            default=[student_name],
+            key=list_key,
+            help="当上面选择的主学生改变时，此列表会自动同步包含该学生。"
+        )
     # 新增：选择查看内容（分数 / 校次排名 / 班次排名）
     view_options = ["校次排名", "班次排名", "分数"]
     view_choice = st.selectbox("选择查看内容", view_options, index=0, key="series_view_type")
