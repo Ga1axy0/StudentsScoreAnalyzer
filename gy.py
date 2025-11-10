@@ -332,7 +332,12 @@ if uploaded_files:
             ordered_keys.append(k)
     ordered_disp = [_proj_disp(k) for k in ordered_keys]
     default_disp = "总分" if "总分_校次" in ordered_keys else (ordered_disp[0] if ordered_disp else "")
-    selected_disp = st.selectbox("选择查看项目（总分或科目）", ordered_disp, index=(ordered_disp.index(default_disp) if default_disp in ordered_disp else 0)) if ordered_disp else None
+    selected_disp = st.multiselect(
+        "选择查看项目（总分或科目）(可多选)",
+        ordered_disp,
+        default=([default_disp] if default_disp else []),
+        help="可选择一个或多个项目进行折线对比"
+    ) if ordered_disp else []
     # 将“折线图对比多个学生”的选项移动至此（紧跟科目/总分选择）
     # ---- 同步多学生对比选择逻辑（避免 default 与 session_state 同时设置冲突） ----
     # 原因：当使用固定 key 时，若在 Session State 中已经设置了该 key 的值，同时又在组件上提供了 default，会触发冲突提示。
@@ -376,35 +381,41 @@ if uploaded_files:
 
     fig_line = go.Figure()
     if selected_disp:
-        # 根据查看内容选择数据列与来源
+        # 根据查看内容选择数据列与来源（支持多项目）
+        y_label = ""
+        reverse_y = False
         if view_choice == "校次排名":
-            selected_key = "总分_校次" if selected_disp == "总分" else f"{selected_disp}_校次"
-            df_tmp = ts_long[ts_long["项目"] == selected_key].copy()
+            selected_keys = [("总分_校次" if disp == "总分" else f"{disp}_校次") for disp in selected_disp]
+            df_tmp = ts_long[ts_long["项目"].isin(selected_keys)].copy()
             df_tmp = df_tmp[df_tmp["姓名"].isin(multi_students)]
             df_tmp["值"] = df_tmp["校次排名"]
-            line_df = df_tmp[["考试标签", "考试顺序", "姓名", "值"]]
+            df_tmp["项目显示名"] = df_tmp["项目"].apply(lambda k: "总分" if k == "总分_校次" else str(k).replace("_校次", ""))
+            line_df = df_tmp[["考试标签", "考试顺序", "姓名", "项目显示名", "值"]]
             y_label = "校次排名"
             reverse_y = True
         elif view_choice == "班次排名":
-            selected_col = "总分_班次" if selected_disp == "总分" else f"{selected_disp}_班次"
-            if selected_col in filtered_df.columns:
-                df_tmp = filtered_df[["考试标签", "考试顺序", "姓名", selected_col]].copy()
+            selected_cols = [("总分_班次" if disp == "总分" else f"{disp}_班次") for disp in selected_disp]
+            exist_cols = [c for c in selected_cols if c in filtered_df.columns]
+            if exist_cols:
+                df_tmp = filtered_df[["考试标签", "考试顺序", "姓名"] + exist_cols].copy()
                 df_tmp = df_tmp[df_tmp["姓名"].isin(multi_students)]
-                df_tmp.rename(columns={selected_col: "值"}, inplace=True)
-                line_df = df_tmp
+                melted = df_tmp.melt(id_vars=["考试标签", "考试顺序", "姓名"], value_vars=exist_cols, var_name="项目", value_name="值")
+                melted["项目显示名"] = melted["项目"].apply(lambda k: "总分" if k == "总分_班次" else str(k).replace("_班次", ""))
+                line_df = melted[["考试标签", "考试顺序", "姓名", "项目显示名", "值"]]
             else:
-                line_df = pd.DataFrame(columns=["考试标签", "考试顺序", "姓名", "值"])  # 空
+                line_df = pd.DataFrame(columns=["考试标签", "考试顺序", "姓名", "项目显示名", "值"])  # 空
             y_label = "班次排名"
             reverse_y = True
         else:  # 分数
-            selected_col = "总分" if selected_disp == "总分" else selected_disp
-            if selected_col in filtered_df.columns:
-                df_tmp = filtered_df[["考试标签", "考试顺序", "姓名", selected_col]].copy()
+            selected_cols = [("总分" if disp == "总分" else disp) for disp in selected_disp]
+            exist_cols = [c for c in selected_cols if c in filtered_df.columns]
+            if exist_cols:
+                df_tmp = filtered_df[["考试标签", "考试顺序", "姓名"] + exist_cols].copy()
                 df_tmp = df_tmp[df_tmp["姓名"].isin(multi_students)]
-                df_tmp.rename(columns={selected_col: "值"}, inplace=True)
-                line_df = df_tmp
+                melted = df_tmp.melt(id_vars=["考试标签", "考试顺序", "姓名"], value_vars=exist_cols, var_name="项目显示名", value_name="值")
+                line_df = melted[["考试标签", "考试顺序", "姓名", "项目显示名", "值"]]
             else:
-                line_df = pd.DataFrame(columns=["考试标签", "考试顺序", "姓名", "值"])  # 空
+                line_df = pd.DataFrame(columns=["考试标签", "考试顺序", "姓名", "项目显示名", "值"])  # 空
             y_label = "分数"
             reverse_y = False
 
@@ -414,25 +425,30 @@ if uploaded_files:
 
         # 生成图或提示
         if line_df.empty:
-            st.warning(f"所选学生无{selected_disp}{y_label}数据。")
+            st.warning("所选学生/科目没有可用的数据。")
         else:
-            # 为数据点添加文本标签
             line_df = line_df.copy()
             line_df["显示值"] = line_df["值"].apply(_fmt_one_decimal)
+            # 同时按学生与项目区分曲线
             fig_line = px.line(
                 line_df.sort_values("考试顺序"),
                 x="考试标签",
                 y="值",
-                color="姓名",
+                # 颜色区分科目/项目（含“总分”）
+                color="项目显示名",
+                # 线型区分学生
+                line_dash="姓名",
+                # 同步使用符号区分学生，提升辨识度
+                symbol="姓名",
                 text="显示值",
                 markers=True,
                 category_orders={"考试标签": exam_label_order},
-                title=f"{selected_disp} {y_label}变化"
+                title=f"{','.join(selected_disp)} {y_label}变化"
             )
             fig_line.update_traces(mode="lines+markers+text", texttemplate="%{text}", textposition="top center")
             if reverse_y:
-                fig_line.update_yaxes(autorange="reversed")  # 名次越小越靠上
-            export_figs[f"{selected_disp} {y_label}变化折线图"] = fig_line
+                fig_line.update_yaxes(autorange="reversed")
+            export_figs[f"{','.join(selected_disp)} {y_label}变化折线图"] = fig_line
     st.plotly_chart(fig_line, use_container_width=True)
 
     st.markdown("---")
