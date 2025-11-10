@@ -1,5 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 
+# 使用绝对路径指向图标，避免工作目录变化导致找不到文件
+ICON_PATH = os.path.abspath('favicon.ico')
 
 a = Analysis(
     ['run.py'],
@@ -18,7 +21,6 @@ a = Analysis(
     excludes=[],
     noarchive=False,
     optimize=0,
-    icons=,
 )
 pyz = PYZ(a.pure)
 
@@ -28,7 +30,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='run',
+    name='StudentScoreAnalyzer',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -36,6 +38,8 @@ exe = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=True,
+    icon=ICON_PATH,
+    version='version_info.txt',
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

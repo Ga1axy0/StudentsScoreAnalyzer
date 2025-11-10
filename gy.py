@@ -31,7 +31,7 @@ except Exception:
 
 st.set_page_config(page_title="成绩可视化看板", layout="wide")
 st.title("📊 成绩可视化看板")
-st.markdown("**By Ga1axy**")
+st.markdown("**By Ga1axy v1.0**")
 
 # ====== 打印优化：注入防分页 CSS ======
 print_css = """
