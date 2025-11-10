@@ -175,20 +175,19 @@ if uploaded_files:
     if HAS_SORTABLES:
         with st.sidebar:
             st.markdown("**拖拽排序**：拖动下列项目改变顺序，从上到下为考试时间顺序")
-            items = [f"{row['考试标签']}" for _, row in work_meta.iterrows()]
+            # 仅使用考试标签作为拖拽项，并按当前“自定义顺序”显示
+            items = [f"{row['考试标签']}" for _, row in work_meta.sort_values("自定义顺序").iterrows()]
             try:
                 # 将文件列表摘要纳入 key，确保当文件增删时，拖拽组件会刷新
                 sorted_items = sort_items(items, direction="vertical", key=f"exam_drag_order_{files_digest}")
-                # 从拖拽结果解析回文件名并生成新的顺序
-                def _extract_filename(s: str) -> str:
-                    # 期望格式：标签 (文件名)
-                    if s.endswith(")") and "(" in s:
-                        return s[s.rfind("(")+1:-1]
-                    return s
-                new_order_map = { _extract_filename(name): idx+1 for idx, name in enumerate(sorted_items) }
-                work_meta["自定义顺序"] = work_meta["文件名"].map(new_order_map).fillna(work_meta["自定义顺序"]) 
-            except Exception:
-                st.info("拖拽排序组件不可用，已回退为表格内手动输入顺序。")
+                # 基于“考试标签”构建 新顺序映射：标签 -> 顺序编号
+                def _extract_label(s: str) -> str:
+                    return str(s)
+                new_order_map = { _extract_label(name): idx + 1 for idx, name in enumerate(sorted_items) }
+                # 根据“考试标签”写入新的“自定义顺序”
+                work_meta["自定义顺序"] = work_meta["考试标签"].map(new_order_map).fillna(work_meta["自定义顺序"]).astype(int)
+            except Exception as e:
+                st.info(f"拖拽排序组件不可用，已回退为表格内手动输入顺序。({e})")
     else:
         st.sidebar.caption("如需拖拽排序，请安装 streamlit-sortables，并重启应用。")
 
@@ -236,12 +235,11 @@ if uploaded_files:
     col_a, col_b = st.columns([1,1])
     with col_a:
         student_name = st.selectbox("选择单个学生", all_students)
-    with col_b:
-        multi_students = st.multiselect("折线图对比多个学生 (可选)", all_students, default=[student_name])
+    # 折线图对比选项已移动到“排名时间序列”的科目选择下方
 
    
-      # ================= 该学生全部考试成绩明细 =================
-    st.subheader("📄 该学生全部考试成绩明细")
+    # ================= 该学生全部考试成绩明细 =================
+    st.subheader("📄 该学生全部考试明细")
     score_cols_exist = (["总分"] if "总分" in filtered_df.columns else []) + [c for c in subjects if c in filtered_df.columns]
     # 单科与总分区分开：明细表仍可同时展示
     score_cols_subjects_only = [c for c in subjects if c in filtered_df.columns]
@@ -255,9 +253,9 @@ if uploaded_files:
         st.table(score_pivot_fmt)
     else:
         st.info("无科目成绩列可供展示。")
+    st.markdown("---")
 
-     # ================= 单学生所有排名明细表 =================
-    st.subheader("📄 该学生全部考试排名明细")
+    # ================= 单学生所有排名明细表 =================
     ts_long = extract_rank_time_series(filtered_df, subjects)
     # 使用考试标签作为列，更直观
     student_all_raw = ts_long[ts_long["姓名"] == student_name].copy()
@@ -271,33 +269,104 @@ if uploaded_files:
     st.table(student_all_fmt)
 
     # ================= 排名时间序列 =================
-    
-    total_rank_long = ts_long[ts_long["项目"] == "总分_校次"].copy()
-    # 折线图：多学生总分排名变化
-    line_df = total_rank_long[total_rank_long["姓名"].isin(multi_students)].copy()
-    # 使用考试标签作为 X 轴，但保持顺序
-    line_df["考试标签"] = pd.Categorical(line_df["考试标签"], categories=exam_label_order, ordered=True)
-    if line_df.empty:
-        st.warning("所选学生无总分校次排名数据。")
-    else:
-        fig_line = px.line(
-            line_df,
-            x="考试标签",
-            y="校次排名",
-            color="姓名",
-            markers=True,
-            category_orders={"考试标签": exam_label_order},
-            title="总分校次排名变化 (名次越低越好)"
-        )
-        fig_line.update_yaxes(autorange="reversed")  # 名次越小越靠上
+    # 可选择查看的项目：总分 或 各科（基于存在的“*_校次”项目）
+    proj_keys = [p for p in ts_long["项目"].dropna().unique().tolist() if isinstance(p, str) and p.endswith("_校次")]
+    # 将内部键映射为展示名（总分_校次 -> 总分；语文_校次 -> 语文）
+    def _proj_disp(k: str) -> str:
+        return "总分" if k == "总分_校次" else k.replace("_校次", "")
+    options_disp = [_proj_disp(k) for k in proj_keys]
+    # 为了稳定顺序，按照 subjects 与“总分”优先的顺序重排
+    ordered_keys = []
+    if "总分_校次" in proj_keys:
+        ordered_keys.append("总分_校次")
+    for s in subjects:
+        k = f"{s}_校次"
+        if k in proj_keys and k not in ordered_keys:
+            ordered_keys.append(k)
+    # 补充任何未覆盖的键
+    for k in proj_keys:
+        if k not in ordered_keys:
+            ordered_keys.append(k)
+    ordered_disp = [_proj_disp(k) for k in ordered_keys]
+    default_disp = "总分" if "总分_校次" in ordered_keys else (ordered_disp[0] if ordered_disp else "")
+    selected_disp = st.selectbox("选择查看项目（总分或科目）", ordered_disp, index=(ordered_disp.index(default_disp) if default_disp in ordered_disp else 0)) if ordered_disp else None
+    # 将“折线图对比多个学生”的选项移动至此（紧跟科目/总分选择）
+    multi_students = st.multiselect("折线图对比多个学生 (可选)", all_students, default=[student_name], key="multi_students_for_line")
+    # 新增：选择查看内容（分数 / 校次排名 / 班次排名）
+    view_options = ["校次排名", "班次排名", "分数"]
+    view_choice = st.selectbox("选择查看内容", view_options, index=0, key="series_view_type")
+
+    fig_line = go.Figure()
+    if selected_disp:
+        # 根据查看内容选择数据列与来源
+        if view_choice == "校次排名":
+            selected_key = "总分_校次" if selected_disp == "总分" else f"{selected_disp}_校次"
+            df_tmp = ts_long[ts_long["项目"] == selected_key].copy()
+            df_tmp = df_tmp[df_tmp["姓名"].isin(multi_students)]
+            df_tmp["值"] = df_tmp["校次排名"]
+            line_df = df_tmp[["考试标签", "考试顺序", "姓名", "值"]]
+            y_label = "校次排名"
+            reverse_y = True
+        elif view_choice == "班次排名":
+            selected_col = "总分_班次" if selected_disp == "总分" else f"{selected_disp}_班次"
+            if selected_col in filtered_df.columns:
+                df_tmp = filtered_df[["考试标签", "考试顺序", "姓名", selected_col]].copy()
+                df_tmp = df_tmp[df_tmp["姓名"].isin(multi_students)]
+                df_tmp.rename(columns={selected_col: "值"}, inplace=True)
+                line_df = df_tmp
+            else:
+                line_df = pd.DataFrame(columns=["考试标签", "考试顺序", "姓名", "值"])  # 空
+            y_label = "班次排名"
+            reverse_y = True
+        else:  # 分数
+            selected_col = "总分" if selected_disp == "总分" else selected_disp
+            if selected_col in filtered_df.columns:
+                df_tmp = filtered_df[["考试标签", "考试顺序", "姓名", selected_col]].copy()
+                df_tmp = df_tmp[df_tmp["姓名"].isin(multi_students)]
+                df_tmp.rename(columns={selected_col: "值"}, inplace=True)
+                line_df = df_tmp
+            else:
+                line_df = pd.DataFrame(columns=["考试标签", "考试顺序", "姓名", "值"])  # 空
+            y_label = "分数"
+            reverse_y = False
+
+        # 使用考试标签作为 X 轴，但保持顺序
+        if not line_df.empty:
+            line_df["考试标签"] = pd.Categorical(line_df["考试标签"], categories=exam_label_order, ordered=True)
+
+        # 生成图或提示
+        if line_df.empty:
+            st.warning(f"所选学生无{selected_disp}{y_label}数据。")
+        else:
+            # 为数据点添加文本标签
+            line_df = line_df.copy()
+            line_df["显示值"] = line_df["值"].apply(_fmt_one_decimal)
+            fig_line = px.line(
+                line_df.sort_values("考试顺序"),
+                x="考试标签",
+                y="值",
+                color="姓名",
+                text="显示值",
+                markers=True,
+                category_orders={"考试标签": exam_label_order},
+                title=f"{selected_disp} {y_label}变化"
+            )
+            fig_line.update_traces(mode="lines+markers+text", texttemplate="%{text}", textposition="top center")
+            if reverse_y:
+                fig_line.update_yaxes(autorange="reversed")  # 名次越小越靠上
+            export_figs[f"{selected_disp} {y_label}变化折线图"] = fig_line
     st.plotly_chart(fig_line, use_container_width=True)
-    export_figs["总分校次排名变化折线图"] = fig_line
 
     st.markdown("---")
     # ================= 雷达图（各科校次排名对比） =================
     st.subheader("🕸️ 雷达图：各科校次排名对比")
     # 选考试标签（多选）
-    available_exams = list(dict.fromkeys(total_rank_long.sort_values("考试顺序")["考试标签"]))
+    # 复用总分的时间序列来提供考试顺序（若没有总分，则回退为整体的考试标签顺序）
+    total_rank_long = ts_long[ts_long["项目"] == "总分_校次"].copy()
+    if not total_rank_long.empty:
+        available_exams = list(dict.fromkeys(total_rank_long.sort_values("考试顺序")["考试标签"]))
+    else:
+        available_exams = list(dict.fromkeys(ts_long.sort_values("考试顺序")["考试标签"]))
     selected_exams_for_radar = st.multiselect("选择要比较的考试 (2~3 次更直观)", available_exams, default=available_exams[-2:] if len(available_exams) >= 2 else available_exams)
 
     if selected_exams_for_radar:
