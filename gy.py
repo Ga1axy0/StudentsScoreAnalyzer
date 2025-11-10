@@ -60,6 +60,8 @@ st.markdown(print_css, unsafe_allow_html=True)
 # 配置 & 常量
 # =====================================
 DEFAULT_SUBJECTS = ["语文", "数学", "英语", "物理", "化学", "生物"]
+# 可选扩展科目列表
+ALL_SUBJECT_OPTIONS = DEFAULT_SUBJECTS + ["政治", "历史", "地理", "技术"]
 
 # ========= 通用数值格式化 =========
 def _fmt_one_decimal(v):
@@ -146,13 +148,21 @@ def transform_rank_for_radar(sub_df: pd.DataFrame) -> pd.DataFrame:
 # =====================================
 st.sidebar.header("⚙️ 数据与排序设置")
 uploaded_files = st.sidebar.file_uploader("上传多个考试 Excel 文件", type=["xlsx"], accept_multiple_files=True)
+st.sidebar.write("---")
 
-subjects_input = st.sidebar.text_input("科目列表(逗号分隔)", ",".join(DEFAULT_SUBJECTS))
-subjects = [s.strip() for s in subjects_input.split(',') if s.strip()]
-
+subjects = st.sidebar.multiselect(
+    "**选择参与分析的科目**",
+    options=ALL_SUBJECT_OPTIONS,
+    default=DEFAULT_SUBJECTS,
+    help="未选中的科目将不会出现在后续图表与表格中。"
+)
+st.sidebar.write("---")
 # 分数图Y轴起点自动调整设置
+st.sidebar.write("**调整Y轴**")
+
 auto_y_start = st.sidebar.checkbox("分数图自动调整Y轴起点", value=True, help="开启后，分数类柱状图的Y轴将从接近最小分数处开始，以放大差异。")
 offset_y = st.sidebar.number_input("Y轴起点下移幅度", min_value=0, max_value=100, value=10, step=1, help="在最小分数基础上再下移的幅度。仅当启用自动调整时生效。")
+st.sidebar.write("---")
 
 if uploaded_files:
     # 收集导出图表
@@ -163,7 +173,9 @@ if uploaded_files:
         base_label = f.name.rsplit('.', 1)[0]
         meta_rows.append({"文件名": f.name, "默认顺序": idx, "自定义顺序": idx, "考试标签": base_label})
     meta_df = pd.DataFrame(meta_rows)
-    st.sidebar.write("可编辑考试顺序与标签：")
+    # 新增“可视”布尔列，默认全部可见
+    if "可视" not in meta_df.columns:
+        meta_df["可视"] = True
     # 基于当前上传文件名生成稳定摘要，用于重置拖拽/编辑组件状态（当增删文件时重建控件）
     names_for_hash = [f.name for f in uploaded_files]
     files_digest = hashlib.md5("|".join(sorted(names_for_hash)).encode("utf-8")).hexdigest()
@@ -191,37 +203,59 @@ if uploaded_files:
     else:
         st.sidebar.caption("如需拖拽排序，请安装 streamlit-sortables，并重启应用。")
 
+    st.sidebar.write("---")
     # 渲染可编辑表（已经按当前顺序排序后展示）
     # 同理，为编辑表设置动态 key，列表变化时重建编辑控件
+    # 侧边栏只显示：考试标签 + 可视（顺序基于拖拽后的 自定义顺序）
+    st.sidebar.write("**可视选项**：在下表中可查看考试展示顺序编辑可视状态。")
+    simplified_df = work_meta.sort_values("自定义顺序")["考试标签 可视".split()]
     edited_meta = st.sidebar.data_editor(
-        work_meta.sort_values("自定义顺序"), num_rows="dynamic", use_container_width=True, key=f"meta_editor_{files_digest}"
+        simplified_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        key=f"meta_editor_{files_digest}"
     )
+    # 将可视状态写回 work_meta
+    try:
+        visibility_map = dict(zip(edited_meta["考试标签"], edited_meta["可视"]))
+        work_meta["可视"] = work_meta["考试标签"].map(visibility_map).fillna(True)
+    except Exception:
+        pass
 
     # 根据自定义顺序排序
+    # 使用 work_meta（已写回可视状态）继续；自定义顺序来自拖拽结果
     try:
-        edited_meta_sorted = edited_meta.sort_values("自定义顺序")
+        edited_meta_sorted = work_meta.sort_values("自定义顺序")
     except Exception:
-        edited_meta_sorted = edited_meta
+        edited_meta_sorted = work_meta
 
-    label_map: Dict[str, Dict] = {row["文件名"]: {"标签": row["考试标签"], "顺序": row["自定义顺序"]} for _, row in edited_meta_sorted.iterrows()}
-    # 供图表使用的考试标签顺序
-    exam_label_order = list(edited_meta_sorted["考试标签"].astype(str).values)
+    visible_meta = edited_meta_sorted[edited_meta_sorted["可视"].fillna(True)] if "可视" in edited_meta_sorted.columns else edited_meta_sorted
+
+    label_map: Dict[str, Dict] = {row["文件名"]: {"标签": row["考试标签"], "顺序": row["自定义顺序"]} for _, row in visible_meta.iterrows()}
+    # 供图表使用的考试标签顺序（仅来自可视的考试）
+    exam_label_order = list(visible_meta["考试标签"].astype(str).values)
 
     # 组合所有考试数据
     exam_dfs = []
+    visible_files = set(visible_meta["文件名"].astype(str).tolist())
     for f in uploaded_files:
-        info = label_map[f.name]
-        exam_dfs.append(build_exam_dataframe(f, info["标签"], info["顺序"], subjects))
+        if f.name in visible_files:
+            info = label_map[f.name]
+            exam_dfs.append(build_exam_dataframe(f, info["标签"], info["顺序"], subjects))
+    if not exam_dfs:
+        st.warning("所有考试均被设为不可视，暂无数据。请在侧边栏勾选‘可视’后继续。")
+        st.stop()
     all_exams_df = pd.concat(exam_dfs, ignore_index=True)
     all_exams_df.sort_values(["考试顺序"], inplace=True)
 
     # ================= 班级筛选 =================
+    st.sidebar.write("---")
     if "班级" in all_exams_df.columns:
         classes = sorted([c for c in all_exams_df["班级"].dropna().astype(str).unique()])
     else:
         classes = []
     if classes:
-        selected_classes = st.sidebar.multiselect("筛选班级", classes, default=classes)
+        selected_classes = st.sidebar.multiselect("**筛选班级**", classes, default=classes)
         filtered_df = all_exams_df[all_exams_df["班级"].astype(str).isin(selected_classes)] if selected_classes else all_exams_df.iloc[0:0]
     else:
         filtered_df = all_exams_df
