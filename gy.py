@@ -513,6 +513,11 @@ if uploaded_files:
     # ================= 排名时间序列 =================
     # 可选择查看的项目：总分 或 各科（基于存在的“*_校次”项目）
     proj_keys = [p for p in ts_long["项目"].dropna().unique().tolist() if isinstance(p, str) and p.endswith("_校次")]
+    # 确保复合科目（语数英/7选3）即使未在侧边栏科目中选，也可供折线图选择
+    for comp in COMPOSITE_SUBJECTS:
+        key_comp = f"{comp}_校次"
+        if key_comp in filtered_df.columns and key_comp not in proj_keys:
+            proj_keys.append(key_comp)
     # 将内部键映射为展示名（总分_校次 -> 总分；语文_校次 -> 语文）
     def _proj_disp(k: str) -> str:
         return "总分" if k == "总分_校次" else k.replace("_校次", "")
@@ -531,10 +536,19 @@ if uploaded_files:
             ordered_keys.append(k)
     ordered_disp = [_proj_disp(k) for k in ordered_keys]
     default_disp = "总分" if "总分_校次" in ordered_keys else (ordered_disp[0] if ordered_disp else "")
+    # 默认：包含 总分 + 语数英 + 7选3（若存在其校次排名列）
+    default_list = []
+    if "总分_校次" in ordered_keys:
+        default_list.append("总分")
+    for comp in COMPOSITE_SUBJECTS:
+        if f"{comp}_校次" in ordered_keys:
+            default_list.append(comp)
+    if not default_list and ordered_disp:
+        default_list = [ordered_disp[0]]
     selected_disp = st.multiselect(
         "选择查看项目（总分或科目）(可多选)",
         ordered_disp,
-        default=([default_disp] if default_disp else []),
+        default=default_disp,
         help="可选择一个或多个项目进行折线对比"
     ) if ordered_disp else []
     # 将“折线图对比多个学生”的选项移动至此（紧跟科目/总分选择）
