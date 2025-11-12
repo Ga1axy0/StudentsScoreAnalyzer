@@ -19,8 +19,9 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from typing import List, Dict
+from typing import List, Dict, Tuple, Optional
 import hashlib
+import io
 
 try:
     # 可选：拖拽排序支持
@@ -59,9 +60,11 @@ st.markdown(print_css, unsafe_allow_html=True)
 # =====================================
 # 配置 & 常量
 # =====================================
-DEFAULT_SUBJECTS = ["语文", "数学", "英语", "物理", "化学", "生物"]
-# 可选扩展科目列表
-ALL_SUBJECT_OPTIONS = DEFAULT_SUBJECTS + ["政治", "历史", "地理", "技术"]
+DEFAULT_SUBJECTS = ["语文", "数学", "英语", "政治", "历史", "地理"]
+# 复合科目（只提供排名，无单独分数）
+COMPOSITE_SUBJECTS = ["语数英", "7选3"]
+# 可选扩展科目列表（加入复合科目作为可选项）
+ALL_SUBJECT_OPTIONS = DEFAULT_SUBJECTS + ["物理", "化学", "生物", "技术"] + COMPOSITE_SUBJECTS
 
 # ========= 通用数值格式化 =========
 def _fmt_one_decimal(v):
@@ -79,30 +82,117 @@ def _fmt_one_decimal(v):
 
 @st.cache_data(show_spinner=False)
 def standardize_columns(df: pd.DataFrame, subjects: List[str]) -> pd.DataFrame:
-    """标准化列名，返回新的 DataFrame（不修改原始）。
-    目标列顺序：准考证号, 班级, 姓名, 总分, 总分_校次, 总分_班次, <每科: 科目, 科目_校次, 科目_班次>...
-    多余列保留为未知列。
+    """将“宁外期末表头”格式映射为统一列名。
+
+    输入表头示例（第一行是考试标签，已在读取时剔除）：
+    班级 学号 姓名 语文 语班 语年 数学 数班 数年 英语 英班 英年 物赋 物班 物年 化赋 化班 化年 生赋 生班 生年 政赋 政班 政年 史赋 史班 史年 地赋 地班 地年 技赋 技班 技年 语数外 班排 年排 7选3 班排 年排 总分 班级排名 年级排名
+
+    目标统一列：
+    - 基础：班级, 准考证号, 姓名, 总分, 总分_班次(班级排名), 总分_校次(年级排名)
+    - 学科：<科目, 科目_班次, 科目_校次>
     """
-    new_cols = ["准考证号", "班级", "姓名", "总分", "总分_校次", "总分_班次"]
-    for subj in subjects:
-        new_cols.extend([subj, f"{subj}_校次", f"{subj}_班次"])
-    cols = list(df.columns)
-    rename_map = {}
-    for i, col in enumerate(cols):
-        if i < len(new_cols):
-            rename_map[col] = new_cols[i]
-        else:
-            rename_map[col] = f"未知列{i - len(new_cols) + 1}"
-    df2 = df.rename(columns=rename_map).copy()
-    # 尝试将分数/排名相关列统一转换为数值，避免出现 bytes 或混合类型导致的 ArrowTypeError
-    numeric_like_cols = ["总分", "总分_校次", "总分_班次"] + \
-        [c for subj in subjects for c in [subj, f"{subj}_校次", f"{subj}_班次"] if c in df2.columns]
+    df2 = df.copy()
+
+    # 列名去空白
+    df2.columns = [str(c).strip() for c in df2.columns]
+
+    # 基础字段映射
+    base_map = {
+        "班级": "班级",
+        "学号": "准考证号",
+        "姓名": "姓名",
+        "总分": "总分",
+        "班级排名": "总分_班次",
+        "年级排名": "总分_校次",
+    }
+
+    # 学科字段映射（分数/班排/年排）
+    # 注意：表中理化生政史地技的分数字段使用“赋”字样
+    subject_source_map = {
+        "语文": ("语文", "语班", "语年"),
+        "数学": ("数学", "数班", "数年"),
+        "英语": ("英语", "英班", "英年"),
+        "物理": ("物赋", "物班", "物年"),
+        "化学": ("化赋", "化班", "化年"),
+        "生物": ("生赋", "生班", "生年"),
+        "政治": ("政赋", "政班", "政年"),
+        "历史": ("史赋", "史班", "史年"),
+        "地理": ("地赋", "地班", "地年"),
+        "技术": ("技赋", "技班", "技年"),
+    }
+
+    rename_map: Dict[str, str] = {}
+    # 应用基础映射（存在才映射）
+    for src, dst in base_map.items():
+        if src in df2.columns:
+            rename_map[src] = dst
+
+    # 应用学科映射
+    for std_subj, (score_col, cls_rank_col, grd_rank_col) in subject_source_map.items():
+        if score_col in df2.columns:
+            rename_map[score_col] = std_subj
+        if cls_rank_col in df2.columns:
+            rename_map[cls_rank_col] = f"{std_subj}_班次"
+        if grd_rank_col in df2.columns:
+            rename_map[grd_rank_col] = f"{std_subj}_校次"
+
+    # 复合科目：语数英（源：语数外 班排/年排），7选3（源：7选3 班排/年排）
+    # 兼容“无空格”和“有空格”两种写法
+    composite_candidates = [
+        ("语数英", ["语数英", "语数外"], ["班排", "年排"]),
+        ("7选3", ["7选3", "七选三"], ["班排", "年排"]),
+    ]
+
+    def _col_exists(*names: str) -> Optional[str]:
+        for n in names:
+            if n in df2.columns:
+                return n
+        return None
+
+    for std_name, bases, rank_words in composite_candidates:
+        # 尝试匹配：<base>班排 或 "<base> 班排"
+        # 年排同理
+        for base in bases:
+            cls_variants = [f"{base}班排", f"{base} 班排"]
+            grd_variants = [f"{base}年排", f"{base} 年排"]
+            # 也兼容“<base> 班级排名/年级排名”的极端情况
+            cls_variants.extend([f"{base}班级排名", f"{base} 班级排名"])
+            grd_variants.extend([f"{base}年级排名", f"{base} 年级排名"])
+            cls_col = _col_exists(*cls_variants)
+            grd_col = _col_exists(*grd_variants)
+            if cls_col:
+                rename_map[cls_col] = f"{std_name}_班次"
+            if grd_col:
+                rename_map[grd_col] = f"{std_name}_校次"
+
+    df2 = df2.rename(columns=rename_map)
+
+    # 仅保留分析所需列，去除未映射的原始列（如“语数外/7选3 的 班排/年排”等），避免重复列名导致 concat 失败
+    # 构建保留列：基础 + 所有学科与复合科目的存在列（分数/班次/校次任一存在即可）
+    all_std_subjects = list(subject_source_map.keys()) + ["语数英", "7选3"]
+    keep_cols_order = [
+        "班级", "准考证号", "姓名", "总分", "总分_班次", "总分_校次",
+    ]
+    for s in all_std_subjects:
+        # 分数列不一定存在（如复合科目通常只有排名），因此分别判断
+        if s in df2.columns:
+            keep_cols_order.append(s)
+        if f"{s}_班次" in df2.columns:
+            keep_cols_order.append(f"{s}_班次")
+        if f"{s}_校次" in df2.columns:
+            keep_cols_order.append(f"{s}_校次")
+    # 实际存在的列
+    keep_cols_order = [c for c in keep_cols_order if c in df2.columns]
+    if keep_cols_order:
+        df2 = df2[keep_cols_order].copy()
+
+    # 数值化：分数与排名字段
+    numeric_like_cols = [c for c in df2.columns if (c == "总分" or c.endswith("_班次") or c.endswith("_校次") or c in list(subject_source_map.keys()))]
 
     def _coerce_numeric(val):
-        # 处理 bytes -> str
         if isinstance(val, bytes):
             try:
-                val = val.decode('utf-8', 'ignore')
+                val = val.decode("utf-8", "ignore")
             except Exception:
                 return pd.NA
         return val
@@ -110,18 +200,127 @@ def standardize_columns(df: pd.DataFrame, subjects: List[str]) -> pd.DataFrame:
     for c in numeric_like_cols:
         if c in df2.columns:
             try:
-                df2[c] = pd.to_numeric(df2[c].map(_coerce_numeric), errors='coerce')
+                df2[c] = pd.to_numeric(df2[c].map(_coerce_numeric), errors="coerce")
             except Exception:
-                # 若异常，不中断流程，仅保持原值
                 pass
+
+    # 班级/姓名等转字符串，避免分类问题
+    for c in ["班级", "姓名", "准考证号"]:
+        if c in df2.columns:
+            try:
+                df2[c] = df2[c].astype(str)
+            except Exception:
+                pass
+
     return df2
 
-def build_exam_dataframe(file, exam_label: str, order: int, subjects: List[str]) -> pd.DataFrame:
-    raw = pd.read_excel(file)
-    df_std = standardize_columns(raw, subjects)
-    df_std["考试标签"] = exam_label
+def _read_excel_bytes(file_obj) -> bytes:
+    """将上传对象读取为 bytes，支持 Streamlit UploadedFile/文件句柄/bytes。"""
+    if hasattr(file_obj, "getvalue"):
+        return file_obj.getvalue()
+    if hasattr(file_obj, "read"):
+        return file_obj.read()
+    if isinstance(file_obj, (bytes, bytearray)):
+        return bytes(file_obj)
+    # 兜底：当传入为路径字符串时
+    with open(file_obj, "rb") as f:
+        return f.read()
+
+def _parse_label_and_dataframe(xlsx_bytes: bytes) -> Tuple[pd.DataFrame, Optional[str]]:
+    """从 Excel bytes 中抽取考试标签与数据表。
+
+    规则：
+    - 第一行（索引0）为考试标签（可能是合并单元格，取该行所有非空单元格拼接）
+    - 找到包含“班级”和“姓名”的行作为表头行，从下一行开始为数据
+    """
+    raw = pd.read_excel(io.BytesIO(xlsx_bytes), header=None)
+    exam_label: Optional[str] = None
+    if not raw.empty:
+        first_row_vals = [str(x).strip() for x in raw.iloc[0].tolist() if pd.notna(x) and str(x).strip() != "nan"]
+        if first_row_vals:
+            exam_label = " ".join(first_row_vals)
+
+    # 寻找表头行（包含关键列）
+    header_row_idx = None
+    for i in range(min(len(raw), 10)):  # 前10行内搜寻
+        row_vals = [str(x).strip() for x in raw.iloc[i].tolist()]
+        if ("班级" in row_vals) and ("姓名" in row_vals):
+            header_row_idx = i
+            break
+
+    if header_row_idx is None:
+        # 回退：假设第1行为标签，第2行为表头
+        header_row_idx = 1 if len(raw) > 1 else 0
+
+    header_vals = [str(x).strip() for x in raw.iloc[header_row_idx].tolist()]
+    data = raw.iloc[header_row_idx + 1 :].copy()
+    data.columns = header_vals
+    # 丢弃全空列
+    data = data.loc[:, ~(data.isna().all())]
+    # 丢弃全空行
+    data = data.dropna(how="all").reset_index(drop=True)
+    return data, exam_label
+
+def build_exam_dataframe(file, fallback_label: str, order: int, subjects: List[str]) -> pd.DataFrame:
+    """读取单个 Excel，使用第一行作为考试标签；如缺失则回退为传入标签。"""
+    xbytes = _read_excel_bytes(file)
+    data_df, label_in_file = _parse_label_and_dataframe(xbytes)
+    df_std = standardize_columns(data_df, subjects)
+    df_std["考试标签"] = label_in_file or fallback_label
     df_std["考试顺序"] = order
+    # ===== 复合科目分数与排名自动计算 =====
+    df_std = _compute_composite_scores_and_ranks(df_std)
     return df_std
+
+def _compute_composite_scores_and_ranks(df: pd.DataFrame) -> pd.DataFrame:
+    """为单次考试数据增加 语数英 与 7选3 的分数及班/校排名（若尚不存在）。
+    语数英 = 语文 + 数学 + 英语（存在则求和）
+    7选3 = 在 [物理, 化学, 生物, 政治, 历史, 地理, 技术] 中取分数最高的 3 科求和（>=3 科才计算，否则求和可用科目）
+    排名：descending 分数越高排名越靠前，使用 method='min' 获得稳定名次。
+    """
+    required_cols_triple = ["语文", "数学", "英语"]
+    has_triple = all(c in df.columns for c in required_cols_triple)
+    if "语数英" not in df.columns and has_triple:
+        df["语数英"] = df[required_cols_triple].sum(axis=1, min_count=1)
+    # 7选3计算
+    elective_cols = [c for c in ["物理", "化学", "生物", "政治", "历史", "地理", "技术"] if c in df.columns]
+    if "7选3" not in df.columns and elective_cols:
+        def _top3_sum(row):
+            vals = [row[c] for c in elective_cols if pd.notna(row[c])]
+            if not vals:
+                return np.nan
+            vals_sorted = sorted(vals, reverse=True)
+            if len(vals_sorted) >= 3:
+                return sum(vals_sorted[:3])
+            return sum(vals_sorted)  # 不足3科则求和全部
+        df["7选3"] = df.apply(_top3_sum, axis=1)
+    # 班级 / 年级排名（按考试标签分组）
+    if "考试标签" in df.columns:
+        # 语数英排名
+        if "语数英" in df.columns:
+            if "语数英_校次" not in df.columns:
+                df["语数英_校次"] = df.groupby("考试标签")["语数英"].rank(method="min", ascending=False)
+            if "语数英_班次" not in df.columns and "班级" in df.columns:
+                df["语数英_班次"] = df.groupby(["考试标签", "班级"])["语数英"].rank(method="min", ascending=False)
+        # 7选3排名
+        if "7选3" in df.columns:
+            if "7选3_校次" not in df.columns:
+                df["7选3_校次"] = df.groupby("考试标签")["7选3"].rank(method="min", ascending=False)
+            if "7选3_班次" not in df.columns and "班级" in df.columns:
+                df["7选3_班次"] = df.groupby(["考试标签", "班级"])["7选3"].rank(method="min", ascending=False)
+    return df
+
+def extract_exam_label_from_file(file) -> Optional[str]:
+    """仅抽取考试标签（第一行）。"""
+    try:
+        xbytes = _read_excel_bytes(file)
+        raw = pd.read_excel(io.BytesIO(xbytes), header=None, nrows=1)
+        if raw.empty:
+            return None
+        vals = [str(x).strip() for x in raw.iloc[0].tolist() if pd.notna(x) and str(x).strip() != "nan"]
+        return " ".join(vals) if vals else None
+    except Exception:
+        return None
 
 def extract_rank_time_series(all_df: pd.DataFrame, subjects: List[str]) -> pd.DataFrame:
     """提取所有学生所有考试的总分及科目校次排名 (长表)。"""
@@ -179,8 +378,8 @@ if uploaded_files:
     # 构造排序/标签编辑表
     meta_rows = []
     for idx, f in enumerate(uploaded_files, start=1):
-        base_label = f.name.rsplit('.', 1)[0]
-        meta_rows.append({"文件名": f.name, "默认顺序": idx, "自定义顺序": idx, "考试标签": base_label})
+        file_label = extract_exam_label_from_file(f) or f.name.rsplit('.', 1)[0]
+        meta_rows.append({"文件名": f.name, "默认顺序": idx, "自定义顺序": idx, "考试标签": file_label})
     meta_df = pd.DataFrame(meta_rows)
     # 新增“可视”布尔列，默认全部可见
     if "可视" not in meta_df.columns:
@@ -464,15 +663,17 @@ if uploaded_files:
     selected_exams_for_radar = st.multiselect("选择要比较的考试 (2~3 次更直观)", available_exams, default=available_exams[-2:] if len(available_exams) >= 2 else available_exams)
 
     if selected_exams_for_radar:
+        # 复合科目（语数英/7选3）不纳入雷达图，避免与单科混合
+        subjects_for_radar = [s for s in subjects if s not in COMPOSITE_SUBJECTS]
         radar_subject_ranks = ts_long[(ts_long["姓名"] == student_name) & (ts_long["考试标签"].isin(selected_exams_for_radar))]
         # 仅保留学科 rank 行
-        subj_rank_mask = radar_subject_ranks["项目"].isin([f"{s}_校次" for s in subjects])
+        subj_rank_mask = radar_subject_ranks["项目"].isin([f"{s}_校次" for s in subjects_for_radar])
         radar_subject_ranks = radar_subject_ranks[subj_rank_mask].copy()
         radar_subject_ranks["学科"] = radar_subject_ranks["项目"].str.replace("_校次", "", regex=False)
         transformed = transform_rank_for_radar(radar_subject_ranks)
         # 构造雷达
         fig_radar = go.Figure()
-        categories = [s for s in subjects if s in transformed["学科"].unique()]
+        categories = [s for s in subjects_for_radar if s in transformed["学科"].unique()]
         if not categories:
             st.info("所选考试缺少学科排名数据。")
         else:
