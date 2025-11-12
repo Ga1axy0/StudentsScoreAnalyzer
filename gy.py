@@ -725,6 +725,42 @@ if uploaded_files:
     else:
         st.info("未找到总分列。")
 
+    # ===== 在此默认增加：语数英 与 7选3 的跨考试对比（同一图：x=科目，颜色=考试标签，y=成绩） =====
+    comp_candidates = ["语数英", "7选3"]
+    present_comps = [c for c in comp_candidates if c in filtered_df.columns]
+    comp_src = filtered_df[filtered_df["姓名"] == student_name]
+    if present_comps and not comp_src.empty:
+        comp_long = (
+            comp_src[["考试标签", "考试顺序"] + present_comps]
+            .melt(id_vars=["考试标签", "考试顺序"], value_vars=present_comps, var_name="科目", value_name="分数")
+        )
+        # 保持考试顺序与科目顺序
+        comp_long["考试标签"] = pd.Categorical(comp_long["考试标签"], categories=exam_label_order, ordered=True)
+        subj_order_comp = [s for s in comp_candidates if s in comp_long["科目"].unique()]
+        comp_long["科目"] = pd.Categorical(comp_long["科目"], categories=subj_order_comp, ordered=True)
+
+        if comp_long["分数"].notna().any():
+            comp_long["显示分数"] = comp_long["分数"].apply(_fmt_one_decimal)
+            fig_comp_mix = px.bar(
+                comp_long.sort_values(["科目", "考试顺序"]),
+                x="科目", y="分数", color="考试标签", text="显示分数",
+                barmode="group",
+                category_orders={"科目": subj_order_comp, "考试标签": exam_label_order},
+                title=f"{student_name} 历次考试 语数英/7选3 对比"
+            )
+            fig_comp_mix.update_traces(texttemplate="%{text}", textposition="outside")
+            if auto_y_start and comp_long["分数"].notna().any():
+                vmin = float(comp_long["分数"].min())
+                vmax = float(comp_long["分数"].max())
+                y0 = max(0.0, vmin - float(offset_y))
+                y1 = vmax * 1.05 if vmax > 0 else 1.0
+                fig_comp_mix.update_yaxes(range=[y0, y1])
+            fig_comp_mix.update_layout(yaxis_title="分数", xaxis_title="科目", height=420)
+            st.plotly_chart(fig_comp_mix, use_container_width=True)
+            export_figs[f"{student_name} 历次考试 语数英_7选3 对比"] = fig_comp_mix
+        else:
+            st.info("该学生在复合科目（语数英/7选3）没有有效分数可对比。")
+
     st.markdown("---")
     # ================= 跨考试成绩对比（X=科目 颜色=考试，排除总分） =================
     st.subheader("📊 跨考试成绩对比（按科目分类，颜色区分考试，不含总分）")
